@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, link, lstat, readFile, rm, writeFile } from "node:fs/promises";
+import { access, link, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -20,6 +20,7 @@ export type PlanModeThinkingLevel = (typeof PLAN_MODE_THINKING_LEVELS)[number];
 export type PlanModeFixedThinkingLevel = Exclude<PlanModeThinkingLevel, "inherit">;
 export interface PlanModeSettings {
 	thinkingLevel: PlanModeThinkingLevel;
+	defaultTools?: string[];
 }
 export type PlanModeSettingsLoadResult =
 	| { kind: "missing"; notice?: string }
@@ -31,9 +32,17 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
 	const thinkingLevel = Object.hasOwn(value, "thinkingLevel")
 		? Reflect.get(value, "thinkingLevel")
 		: "inherit";
-	return PLAN_MODE_THINKING_LEVELS.includes(thinkingLevel as PlanModeThinkingLevel)
-		? { thinkingLevel: thinkingLevel as PlanModeThinkingLevel }
-		: undefined;
+	if (!PLAN_MODE_THINKING_LEVELS.includes(thinkingLevel as PlanModeThinkingLevel)) {
+		return undefined;
+	}
+	const settings: PlanModeSettings = {
+		thinkingLevel: thinkingLevel as PlanModeThinkingLevel,
+	};
+	if (!Object.hasOwn(value, "defaultTools")) return settings;
+
+	const defaultTools = normalizeToolNames(Reflect.get(value, "defaultTools"));
+	if (!defaultTools) return undefined;
+	return { ...settings, defaultTools };
 }
 
 export async function readPlanModeSettings(
@@ -100,6 +109,23 @@ export async function readPlanModeSettings(
 			...legacy,
 			notice: `Plan-mode settings migrated to ${PLAN_MODE_SETTINGS_FILE}, but ${LEGACY_PLAN_MODE_SETTINGS_FILE} could not be removed: ${formatError(error)}.`,
 		};
+	}
+}
+
+export async function writePlanModeSettings(
+	settings: PlanModeSettings,
+	settingsPath = join(getAgentDir(), PLAN_MODE_SETTINGS_FILE),
+) {
+	await mkdir(dirname(settingsPath), { recursive: true });
+	const tempFile = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`;
+	try {
+		await writeFile(tempFile, `${JSON.stringify(settings, null, 2)}\n`, {
+			encoding: "utf8",
+			flag: "wx",
+		});
+		await rename(tempFile, settingsPath);
+	} finally {
+		await rm(tempFile, { force: true }).catch(() => undefined);
 	}
 }
 
@@ -182,6 +208,13 @@ async function exists(path: string) {
 	} catch {
 		return false;
 	}
+}
+
+function normalizeToolNames(value: unknown) {
+	if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string")) {
+		return undefined;
+	}
+	return [...new Set(value)];
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

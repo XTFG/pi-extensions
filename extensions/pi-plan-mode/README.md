@@ -11,7 +11,7 @@ Pi core intentionally does not ship a built-in plan mode; this package provides 
 - Adds `/plan` to enter or manage Plan mode.
 - Adds `--plan` to start a session in Plan mode.
 - Enables built-in read-only tools by default while Plan mode is active.
-- Disables extension and custom tools by default, with a `/plan tools` selector for explicit user-risk opt-in.
+- Disables extension and custom tools by default, with a `/plan tools` selector for explicit user-risk opt-in and optional cross-session global defaults.
 - Blocks `update_plan`, mutating built-in tools, and unsafe shell forms such as writes, substitutions, background jobs, dependency installs, and mutating Git commands.
 - Injects Codex-like Plan mode instructions: explore first, ask decision questions for high-impact ambiguity, do not mutate files, and finalize only when decision-complete.
 - Adds required `plan_mode_question` and `plan_mode_complete` tools for structured questions and completion.
@@ -46,17 +46,19 @@ pi -e ./extensions/pi-plan-mode
 /plan
 /plan <prompt>
 /plan tools
+/plan tools-save-default
+/plan tools-use-default
 /plan show
 /plan finalize
 /plan implement
 /plan exit
 ```
 
-Use `/plan` to enter Plan mode before writing your planning prompt. Use `/plan <prompt>` to enter Plan mode and immediately submit `<prompt>` as the first Plan-mode user message. Use `/plan tools` to choose which tools are active while Plan mode is enabled; the selector is paginated at 10 tools per page. `/plan show` displays the stored plan without starting a model turn, `/plan finalize` explicitly asks the agent to complete the plan or ask one remaining material question, and `/plan implement` hands a stored plan to a normal implementation turn. `show` and `implement` fail closed when no plan is stored; `finalize` requires active Plan mode.
+Use `/plan` to enter Plan mode before writing your planning prompt, or `/plan <prompt>` to enter it and immediately submit the first Plan-mode message. `/plan tools` opens the paginated tool selector. `/plan tools-save-default` saves the effective selection for future sessions, while `/plan tools-use-default` clears the current session override and reapplies that global default. `/plan show` displays the stored plan without starting a model turn, `/plan finalize` asks the agent to complete the plan or resolve one remaining material question, and `/plan implement` hands the stored plan to a normal implementation turn. `show` and `implement` fail closed when no plan is stored; `finalize` requires active Plan mode.
 
 When Plan mode is active, ask the agent to design the change. The agent may inspect files and run read-only commands, but it should not edit files or execute the implementation. It should explore first, then use structured questions when your preference or a tradeoff materially changes the plan.
 
-By default, Plan mode manages only Pi's built-in tools: `read`, limited `bash`, available read-only built-ins such as `grep`, `find`, and `ls`, plus the required `plan_mode_question` and `plan_mode_complete` tools. Built-in `edit` and `write` are blocked. `update_plan` is also blocked because it tracks execution progress rather than conversational planning. Extension and custom tools are disabled by default because Pi tools do not expose standardized mutability metadata; enable them from `/plan tools` only when you accept the risk for that session. For example, you can opt into `firecrawl_scrape`, `firecrawl_search`, or `lsp_diagnostics` if those extensions are loaded and you want to use them during planning.
+By default, Plan mode manages only Pi's built-in tools: `read`, limited `bash`, available read-only built-ins such as `grep`, `find`, and `ls`, plus the required `plan_mode_question` and `plan_mode_complete` tools. Built-in `edit` and `write` are blocked. `update_plan` is also blocked because it tracks execution progress rather than conversational planning. Extension and custom tools are disabled by default because Pi tools do not expose standardized mutability metadata; enable them from `/plan tools` only when you accept the risk for that session. For example, you can opt into `firecrawl_scrape`, `firecrawl_search`, or `lsp_diagnostics` if those extensions are loaded and you want to use them during planning. A selection stored in the current session overrides `defaultTools`; `/plan tools-use-default` clears that session override.
 
 Limited `bash` uses a fail-closed policy. It accepts common inspection commands, read-only Git and npm queries, pipelines and command lists composed entirely of accepted commands, plus selected checks such as `npm test`, `npm run typecheck`, and `cargo test`. It rejects output/input redirects, command substitution, subshells, background jobs, mutating flags, dependency changes, editors, and unknown commands. Tests and builds may still write ignored caches or build artifacts and may execute project-defined hooks; enable or invoke them only when the repository is trusted. This is extension-level risk reduction, not an OS sandbox.
 
@@ -83,17 +85,28 @@ You can also exit directly. Direct exit discards the latest proposed plan instea
 /plan exit
 ```
 
-## ⚙️ Thinking level
+## ⚙️ Settings
 
-Plan mode inherits Pi's current thinking level by default. To request a fixed level only while Plan mode is active, create `$PI_CODING_AGENT_DIR/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`):
+Create `$PI_CODING_AGENT_DIR/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`) to configure a fixed Plan-mode thinking level and/or the cross-session default tool allowlist:
 
 ```json
 {
-  "thinkingLevel": "medium"
+  "thinkingLevel": "medium",
+  "defaultTools": [
+    "read",
+    "ls",
+    "fffind",
+    "ffgrep",
+    "web_search",
+    "web_fetch",
+    "advisor"
+  ]
 }
 ```
 
-Supported values are `inherit`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The extension snapshots the prior level and restores it on exit only if the level still matches the value it applied; a manual change made during Plan mode is preserved. The settings file is optional, is read at session start, and never changes Pi's default setting. Invalid settings produce a warning and fall back to `inherit`.
+`thinkingLevel` and `defaultTools` are independent optional settings; the file may contain either, both, or neither. Supported `thinkingLevel` values are `inherit`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. When omitted, it defaults to `inherit`. The extension snapshots the prior level and restores it on exit only if the level still matches the value it applied, so a manual change made during Plan mode is preserved.
+
+`defaultTools` stores tool names. When omitted, Plan mode uses its safe built-in defaults; an explicit empty array means no optional Plan-mode tools. Unknown, unavailable, and blocked built-in names are ignored when applied, and the required `plan_mode_question` and `plan_mode_complete` tools are always added. Saving replaces the configured state of tools currently available in `/plan tools` while preserving configured names that are currently unregistered or unselectable. Invalid settings produce a warning.
 
 Compatibility: a valid legacy `plan-mode.json` is migrated automatically to `pi-plan-mode.json`. If both files exist, the new filename takes precedence.
 

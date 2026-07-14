@@ -1,0 +1,38 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # 03:00 Asia/Shanghai (UTC+8)
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure upstream
+        run: git remote add upstream https://github.com/narumiruna/pi-extensions.git
+
+      - name: Fast-forward from upstream
+        run: |
+          git fetch upstream main
+          git merge --ff-only upstream/main
+
+      - name: Push synchronized main
+        run: git push origin main

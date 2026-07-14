@@ -40,6 +40,7 @@ import {
 	configuredThinkingLevel,
 	readPlanModeSettings,
 	type PlanModeSettings,
+	writePlanModeSettings,
 } from "./settings.js";
 import {
 	restorePlanModeState,
@@ -79,6 +80,16 @@ const PLAN_COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
 	{ value: "exit", label: "exit", description: "Leave Plan mode" },
 	{ value: "off", label: "off", description: "Leave Plan mode" },
 	{ value: "tools", label: "tools", description: "Select tools allowed in Plan mode" },
+	{
+		value: "tools-save-default",
+		label: "tools-save-default",
+		description: "Save this session's selected tools as the global default",
+	},
+	{
+		value: "tools-use-default",
+		label: "tools-use-default",
+		description: "Restore this session to the global default tools",
+	},
 ];
 
 export default function planMode(pi: ExtensionAPI) {
@@ -191,6 +202,14 @@ export default function planMode(pi: ExtensionAPI) {
 			if (command === "tools") {
 				if (!state.enabled) enterPlanMode(ctx);
 				await showToolSelector(ctx);
+				return;
+			}
+			if (command === "tools-save-default") {
+				await saveCurrentToolsAsDefault(ctx);
+				return;
+			}
+			if (command === "tools-use-default") {
+				useDefaultToolsForSession(ctx);
 				return;
 			}
 			if (prompt) {
@@ -651,7 +670,7 @@ export default function planMode(pi: ExtensionAPI) {
 
 	function planModeSelectedNames(tools: ToolInfo[]) {
 		const selectedToolNames = state.selectedToolNames ?? migrateSelectedToolKeys(tools);
-		if (selectedToolNames === undefined) return new Set(defaultPlanModeToolNames(tools));
+		if (selectedToolNames === undefined) return new Set(configuredDefaultToolNames(tools));
 
 		state = {
 			...state,
@@ -661,10 +680,50 @@ export default function planMode(pi: ExtensionAPI) {
 		return new Set(state.selectedToolNames);
 	}
 
+	function configuredDefaultToolNames(tools: ToolInfo[]) {
+		return settings.defaultTools === undefined
+			? defaultPlanModeToolNames(tools)
+			: filterAvailableSelectedNames(settings.defaultTools, tools);
+	}
+
 	function defaultPlanModeToolNames(tools: ToolInfo[]) {
 		return tools
 			.filter((tool) => isBuiltinTool(tool) && SAFE_BUILTIN_PLAN_TOOLS.has(tool.name))
 			.map((tool) => tool.name);
+	}
+
+	async function saveCurrentToolsAsDefault(ctx: ExtensionContext) {
+		const tools = selectableTools();
+		const selectable = tools.filter(canSelectToolInPlanMode);
+		const selectableNames = new Set(selectable.map((tool) => tool.name));
+		const selectedNames = planModeSelectedNames(tools);
+		const defaultTools = unique([
+			...(settings.defaultTools ?? []).filter((name) => !selectableNames.has(name)),
+			...selectable.filter((tool) => selectedNames.has(tool.name)).map((tool) => tool.name),
+		]);
+		const nextSettings = { ...settings, defaultTools };
+		try {
+			await writePlanModeSettings(nextSettings);
+			settings = nextSettings;
+			ctx.ui.notify(
+				`Saved Plan-mode global default tools: ${defaultTools.join(", ") || "none"}.`,
+				"info",
+			);
+		} catch (error: unknown) {
+			const detail = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Unable to save Plan-mode global default tools: ${detail}`, "error");
+		}
+	}
+
+	function useDefaultToolsForSession(ctx: ExtensionContext) {
+		state = { ...state, selectedToolNames: undefined, selectedToolKeys: undefined };
+		if (state.enabled) applyPlanModeTools();
+		persistState();
+		updateUi(ctx);
+		ctx.ui.notify(
+			`Restored this session to the Plan-mode global default tools: ${formatConfiguredToolSummary()}.`,
+			"info",
+		);
 	}
 
 	function migrateSelectedToolKeys(tools: ToolInfo[]) {
@@ -817,6 +876,10 @@ export default function planMode(pi: ExtensionAPI) {
 		return `Tools: ${names.length > 0 ? names.join(", ") : "none"}`;
 	}
 
+	function formatConfiguredToolSummary() {
+		return configuredDefaultToolNames(selectableTools()).join(", ") || "none";
+	}
+
 	function isBuiltinToolName(toolName: string) {
 		const tool = toolByName(toolName);
 		return tool ? isBuiltinTool(tool) : toolName === "bash";
@@ -919,5 +982,9 @@ export {
 } from "./message-transform.js";
 export { buildPlanModePrompt } from "./prompt.js";
 export { normalizePlanModeQuestionParams } from "./question-tool.js";
-export { normalizePlanModeSettings, readPlanModeSettings } from "./settings.js";
+export {
+	normalizePlanModeSettings,
+	readPlanModeSettings,
+	writePlanModeSettings,
+} from "./settings.js";
 export { canSelectToolInPlanMode, classifyPlanModeTool, isSafeCommand } from "./tool-policy.js";

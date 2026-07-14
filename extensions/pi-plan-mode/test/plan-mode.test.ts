@@ -25,6 +25,7 @@ import planMode, {
 	stripProposedPlanBlocksFromMessage,
 	withoutPlanModeQuestionTool,
 	withRequiredPlanModeTools,
+	writePlanModeSettings,
 } from "../src/plan-mode.js";
 
 test("plan-mode registers flag, question tool, command, and safety hooks", () => {
@@ -45,11 +46,20 @@ test("plan-mode registers flag, question tool, command, and safety hooks", () =>
 test("completePlanArguments suggests management tokens only", () => {
 	assert.deepEqual(
 		completePlanArguments("")?.map((item) => item.label),
-		["show", "finalize", "implement", "exit", "off", "tools"],
+		[
+			"show",
+			"finalize",
+			"implement",
+			"exit",
+			"off",
+			"tools",
+			"tools-save-default",
+			"tools-use-default",
+		],
 	);
 	assert.deepEqual(
-		completePlanArguments("to")?.map((item) => item.value),
-		["tools"],
+		completePlanArguments("tools-")?.map((item) => item.value),
+		["tools-save-default", "tools-use-default"],
 	);
 	assert.equal(completePlanArguments("tools "), null);
 	assert.equal(completePlanArguments("write a plan"), null);
@@ -233,23 +243,43 @@ test("normalizePlanModeQuestionParams validates question shape", () => {
 	});
 });
 
-test("Plan-mode settings validate inherit and fixed thinking levels", async () => {
+test("Plan-mode settings validate independent optional settings", () => {
 	assert.deepEqual(normalizePlanModeSettings({}), { thinkingLevel: "inherit" });
 	assert.deepEqual(normalizePlanModeSettings({ thinkingLevel: "medium" }), {
 		thinkingLevel: "medium",
 	});
-	assert.deepEqual(normalizePlanModeSettings({ thinkingLevel: "max" }), {
-		thinkingLevel: "max",
+	assert.deepEqual(normalizePlanModeSettings({ defaultTools: [] }), {
+		thinkingLevel: "inherit",
+		defaultTools: [],
 	});
+	assert.deepEqual(
+		normalizePlanModeSettings({
+			thinkingLevel: "max",
+			defaultTools: ["read", "advisor", "read"],
+		}),
+		{
+			thinkingLevel: "max",
+			defaultTools: ["read", "advisor"],
+		},
+	);
 	assert.equal(normalizePlanModeSettings({ thinkingLevel: "extreme" }), undefined);
+	assert.equal(normalizePlanModeSettings({ defaultTools: ["read", 1] }), undefined);
+});
 
+test("Plan-mode settings writer creates and replaces the settings file", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-test-"));
 	try {
 		const path = join(directory, "pi-plan-mode.json");
-		await writeFile(path, '{"thinkingLevel":"high"}');
+		await writePlanModeSettings({ thinkingLevel: "high", defaultTools: ["read", "advisor"] }, path);
 		assert.deepEqual(await readPlanModeSettings(path), {
 			kind: "loaded",
-			settings: { thinkingLevel: "high" },
+			settings: { thinkingLevel: "high", defaultTools: ["read", "advisor"] },
+		});
+
+		await writePlanModeSettings({ thinkingLevel: "low", defaultTools: ["ls"] }, path);
+		assert.deepEqual(await readPlanModeSettings(path), {
+			kind: "loaded",
+			settings: { thinkingLevel: "low", defaultTools: ["ls"] },
 		});
 	} finally {
 		await rm(directory, { recursive: true, force: true });
@@ -257,10 +287,7 @@ test("Plan-mode settings validate inherit and fixed thinking levels", async () =
 });
 
 test("Plan-mode settings migrate to the canonical package filename", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-migration-"));
-	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = directory;
-	try {
+	await withTempAgentDir("pi-plan-mode-migration-", async (directory) => {
 		await writeFile(
 			join(directory, "plan-mode.json"),
 			'{"thinkingLevel":"high","futureOption":true}',
@@ -275,10 +302,11 @@ test("Plan-mode settings migrate to the canonical package filename", async () =>
 		await assert.rejects(access(join(directory, "plan-mode.json")));
 
 		await writeFile(join(directory, "plan-mode.json"), '{"thinkingLevel":"low"}');
-		await writeFile(join(directory, "pi-plan-mode.json"), '{"thinkingLevel":"medium"}');
+		await writeFile(join(directory, "pi-plan-mode.json"), '{"defaultTools":["bash"]}');
 		const preferred = await readPlanModeSettings();
 		assert.deepEqual(preferred.kind === "loaded" ? preferred.settings : undefined, {
-			thinkingLevel: "medium",
+			thinkingLevel: "inherit",
+			defaultTools: ["bash"],
 		});
 		assert.match(preferred.notice ?? "", /ignored/i);
 
@@ -295,22 +323,182 @@ test("Plan-mode settings migrate to the canonical package filename", async () =>
 		assert.equal((await readPlanModeSettings()).kind, "invalid");
 		await assert.rejects(access(join(directory, "pi-plan-mode.json")));
 
-		await writeFile(join(directory, "plan-mode.json"), '{"thinkingLevel":"high"}');
+		await writeFile(join(directory, "plan-mode.json"), '{"defaultTools":["read"]}');
 		await symlink("missing-target", join(directory, "pi-plan-mode.json"));
 		const fallback = await readPlanModeSettings();
 		assert.deepEqual(fallback.kind === "loaded" ? fallback.settings : undefined, {
-			thinkingLevel: "high",
+			thinkingLevel: "inherit",
+			defaultTools: ["read"],
 		});
 		assert.match(fallback.notice ?? "", /migration failed/i);
 		assert.equal(
 			await readFile(join(directory, "plan-mode.json"), "utf8"),
-			'{"thinkingLevel":"high"}',
+			'{"defaultTools":["read"]}',
 		);
-	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		await rm(directory, { recursive: true, force: true });
-	}
+	});
+});
+
+test("missing or thinking-only settings keep the safe built-in defaults", async () => {
+	await withTempAgentDir("pi-plan-mode-safe-defaults-", async (directory) => {
+		const settingsPath = join(directory, "pi-plan-mode.json");
+		const allTools = [
+			builtinTool("read"),
+			builtinTool("bash"),
+			builtinTool("ls"),
+			extensionTool("advisor"),
+		];
+		const expectedTools = ["bash", "ls", "read", "plan_mode_question", "plan_mode_complete"];
+
+		for (const settingsContents of [undefined, '{"thinkingLevel":"medium"}']) {
+			if (settingsContents) await writeFile(settingsPath, settingsContents);
+			else await rm(settingsPath, { force: true });
+
+			const mock = createMockPi({ activeTools: ["read", "bash"], allTools });
+			planMode(mock.pi);
+			const context = createMockContext();
+			await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+			await mock.commands.get("plan")?.handler("", context.ctx);
+			assert.deepEqual(mock.rawPi.getActiveTools(), expectedTools);
+		}
+	});
+});
+
+test("explicit empty default tools enables only required Plan tools", async () => {
+	await withTempAgentDir("pi-plan-mode-empty-defaults-", async (directory) => {
+		await writeFile(join(directory, "pi-plan-mode.json"), '{"defaultTools":[]}');
+		const mock = createMockPi({
+			activeTools: ["read", "bash"],
+			allTools: [builtinTool("read"), builtinTool("bash")],
+		});
+		planMode(mock.pi);
+		const context = createMockContext();
+		await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+		await mock.commands.get("plan")?.handler("", context.ctx);
+		assert.deepEqual(mock.rawPi.getActiveTools(), ["plan_mode_question", "plan_mode_complete"]);
+	});
+});
+
+test("global default tools apply across sessions while session selection wins", async () => {
+	await withTempAgentDir("pi-plan-mode-default-tools-", async (directory) => {
+		await writeFile(
+			join(directory, "pi-plan-mode.json"),
+			JSON.stringify({
+				thinkingLevel: "inherit",
+				defaultTools: ["read", "advisor", "missing", "write"],
+			}),
+		);
+		const allTools = [
+			builtinTool("read"),
+			builtinTool("bash"),
+			builtinTool("write"),
+			extensionTool("advisor"),
+			extensionTool("other"),
+		];
+
+		const first = createMockPi({ activeTools: ["read", "bash"], allTools });
+		planMode(first.pi);
+		const firstContext = createMockContext();
+		await first.events.get("session_start")?.[0]?.({}, firstContext.ctx);
+		await first.commands.get("plan")?.handler("", firstContext.ctx);
+		assert.deepEqual(first.rawPi.getActiveTools(), [
+			"read",
+			"advisor",
+			"plan_mode_question",
+			"plan_mode_complete",
+		]);
+
+		const resumedState = activePlanState(["bash", "other"]);
+		const resumed = createMockPi({ activeTools: ["read", "bash"], allTools });
+		planMode(resumed.pi);
+		const resumedContext = contextWithBranch(resumedState);
+		await resumed.events.get("session_start")?.[0]?.({}, resumedContext.ctx);
+		assert.deepEqual(resumed.rawPi.getActiveTools(), [
+			"bash",
+			"other",
+			"plan_mode_question",
+			"plan_mode_complete",
+		]);
+	});
+});
+
+test("Plan tool commands merge visible selections and restore the global default", async () => {
+	await withTempAgentDir("pi-plan-mode-tool-commands-", async (directory) => {
+		const settingsPath = join(directory, "pi-plan-mode.json");
+		await writeFile(
+			settingsPath,
+			JSON.stringify({
+				thinkingLevel: "high",
+				defaultTools: ["read", "advisor", "missing", "write"],
+			}),
+		);
+		const allTools = [
+			builtinTool("read"),
+			builtinTool("bash"),
+			builtinTool("write"),
+			extensionTool("advisor"),
+			extensionTool("other"),
+		];
+		const resumedState = activePlanState(["bash", "other"]);
+		const mock = createMockPi({ activeTools: ["read", "bash"], allTools });
+		planMode(mock.pi);
+		const context = contextWithBranch(resumedState);
+		await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+
+		await mock.commands.get("plan")?.handler("tools-save-default", context.ctx);
+		assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+			thinkingLevel: "high",
+			defaultTools: ["missing", "write", "bash", "other"],
+		});
+		assert.match(
+			context.notifications.at(-1)?.message ?? "",
+			/Saved.*missing, write, bash, other/i,
+		);
+
+		await writeFile(
+			settingsPath,
+			JSON.stringify({ thinkingLevel: "high", defaultTools: ["read", "advisor"] }),
+		);
+		const restoredMock = createMockPi({ activeTools: ["read", "bash"], allTools });
+		planMode(restoredMock.pi);
+		const restoredContext = contextWithBranch(resumedState);
+		await restoredMock.events.get("session_start")?.[0]?.({}, restoredContext.ctx);
+		await restoredMock.commands.get("plan")?.handler("tools-use-default", restoredContext.ctx);
+		assert.deepEqual(restoredMock.rawPi.getActiveTools(), [
+			"read",
+			"advisor",
+			"plan_mode_question",
+			"plan_mode_complete",
+		]);
+		assert.equal(
+			(restoredMock.entries.at(-1)?.data as { selectedToolNames?: string[] } | undefined)
+				?.selectedToolNames,
+			undefined,
+		);
+		assert.match(restoredContext.notifications.at(-1)?.message ?? "", /Restored.*read, advisor/i);
+	});
+});
+
+test("saving global defaults directly persists the active safe built-in defaults", async () => {
+	await withTempAgentDir("pi-plan-mode-save-inherited-default-", async (directory) => {
+		const mock = createMockPi({
+			activeTools: ["read", "bash"],
+			allTools: [
+				builtinTool("read"),
+				builtinTool("bash"),
+				builtinTool("ls"),
+				extensionTool("advisor"),
+			],
+		});
+		planMode(mock.pi);
+		const context = createMockContext();
+		await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+		await mock.commands.get("plan")?.handler("tools-save-default", context.ctx);
+		assert.deepEqual(JSON.parse(await readFile(join(directory, "pi-plan-mode.json"), "utf8")), {
+			thinkingLevel: "inherit",
+			defaultTools: ["bash", "ls", "read"],
+		});
+		assert.match(context.notifications.at(-1)?.message ?? "", /Saved.*bash, ls, read/i);
+	});
 });
 
 test("missing settings reset a previously loaded fixed thinking level", async () => {
@@ -1228,6 +1416,36 @@ test("Plan prompt requires the standalone completion contract", () => {
 	assert.match(prompt, /behavior-level/i);
 	assert.doesNotMatch(prompt, /<proposed_plan>/i);
 });
+
+async function withTempAgentDir(prefix: string, run: (directory: string) => Promise<void>) {
+	const directory = await mkdtemp(join(tmpdir(), prefix));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	try {
+		await run(directory);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+function activePlanState(selectedToolNames: string[]) {
+	return {
+		type: "custom",
+		customType: "plan-mode-state",
+		data: { enabled: true, awaitingAction: false, selectedToolNames },
+	};
+}
+
+function contextWithBranch(branchEntry: ReturnType<typeof activePlanState>) {
+	return createMockContext({
+		sessionManager: {
+			getBranch: () => [branchEntry],
+			getEntries: () => [branchEntry],
+		},
+	});
+}
 
 test("proposed-plan helpers extract and remove plan blocks", () => {
 	assert.equal(extractProposedPlan("Intro\n<proposed_plan>\n# Plan\n</proposed_plan>"), "# Plan");
