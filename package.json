@@ -8,6 +8,11 @@
 	"workspaces": [
 		"extensions/*"
 	],
+	"pi": {
+		"extensions": [
+			"./extensions/pi-plan-mode/src/plan-mode.ts"
+		]
+	},
 	"scripts": {
 		"format": "biome format --write .",
 		"lint": "biome lint .",
